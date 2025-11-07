@@ -1,45 +1,39 @@
 #pragma once
 #include <Arduino.h>
+#include <map>
+#include <vector>
 #include "ConfigManager.h"
+#include "Metrics.h"
 
-struct ProbeRing {
-  static const int N = 10;
-  bool filled = false;
-  int  head   = 0;
-  float co2[N], temp[N], hum[N], db[N];
-  unsigned long ts[N];
-  void push(float c, float t, float h, float d, unsigned long now) {
-    co2[head]=c; temp[head]=t; hum[head]=h; db[head]=d; ts[head]=now;
-    head = (head + 1) % N;
-    if (head == 0) filled = true;
-  }
-};
-
+// ================================================================
+//  SensorHandler
+// ================================================================
 class SensorHandler {
 public:
-  explicit SensorHandler(ConfigManager* cfg) : _cfg(cfg) {}
-  void setSensorSerial(HardwareSerial* s) { _sensorSerial = s; }
-  void setDiagSerial(HardwareSerial* s)   { _diagSerial = s; }
+  // Use Stream* so this works with Serial (USB) or HardwareSerial
+  SensorHandler(ConfigManager* cfg, Stream* out)
+    : _cfg(cfg), _out(out) {}
 
-  // Called with full text line from Sensor UART
-  void handleSensorLine(const String& line);
+  // Process a line from sensors UART (CO2, TEMP, HUM, etc. or SET PROBE)
+  void handleSensorMessage(const String& line);
+
+  // Optional: assign UARTs for outgoing messages
+  void setSensorSerial(HardwareSerial* s) { _sensorSerial = s; }
+  void setDiagSerial(HardwareSerial* d)   { _diagSerial = d; }
+
+  // Retrieve last 10 values for a metric or all metrics
+  bool getHistory(const String& probe, Metric m, std::vector<float>& out);
+  bool getAllHistory(const String& probe, std::vector<std::pair<Metric,std::vector<float>>>& out);
 
 private:
-  ConfigManager*  _cfg;
+  ConfigManager* _cfg;
+  Stream* _out;  // ✅ Works with both Serial (USB) and HardwareSerial
   HardwareSerial* _sensorSerial = nullptr;
   HardwareSerial* _diagSerial   = nullptr;
 
-  struct ProbeEntry { String id; ProbeRing ring; };
-  ProbeEntry _probes[32];
-  int        _probeCount = 0;
+  // Per-probe metric history (rolling window)
+  std::map<String, std::map<Metric, std::vector<float>>> _history;
 
-  ProbeRing* upsertRing(const String& id);
-  void updateAreaLive(const String& probeId, float co2, float t, float h, float d);
-
-  void ackSensor(const String& s);
-  void handleProbeAssignFromProbe(const String& probeId, const String& area, const String& loc);
-  void handleSetProbes(const String& probeId, const String& area, const String& loc);
-  void handleRemoveProbe(const String& probeId);
-
-  bool parseTelemetry(const String& body, float& co2, float& t, float& h, float& d);
+  void updateHistory(const String& probe, Metric m, float value);
+  void updateAreaStats(const String& probe, Metric m, float value);
 };

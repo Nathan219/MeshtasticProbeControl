@@ -1,187 +1,147 @@
 #include "SensorHandler.h"
-#include "Baselines.h"
+#include "Metrics.h"
+#include "ConfigManager.h"
+
+// from CommandParser.cpp for unified timestamped output
+void echoDiagTX(const String& msg);
 
 // ================================================================
-//  Timestamped debug helpers
+//  Handle incoming sensor messages
 // ================================================================
-static String nowStamp() {
-  unsigned long ms = millis();
-  unsigned long s = ms / 1000;
-  unsigned long m = s / 60;
-  char buf[20];
-  snprintf(buf, sizeof(buf), "[%02lu:%02lu.%03lu] ", m % 60, s % 60, ms % 1000);
-  return String(buf);
-}
-
-static void echoSensTX(const String& msg) {
-  Serial.print(nowStamp());
-  Serial.print("[SENS TX] ");
-  Serial.println(msg);
-}
-
-static void echoDiagTX(const String& msg) {
-  Serial.print(nowStamp());
-  Serial.print("[DIAG TX] ");
-  Serial.println(msg);
-}
-
-static String up(const String& s){ String o=s; o.toUpperCase(); return o; }
-
-// ================================================================
-//  Implementation
-// ================================================================
-ProbeRing* SensorHandler::upsertRing(const String& id) {
-  String uid = up(id);
-  for (int i=0;i<_probeCount;i++) if (_probes[i].id == uid) return &_probes[i].ring;
-  if (_probeCount < (int)(sizeof(_probes)/sizeof(_probes[0]))) {
-    _probes[_probeCount].id = uid;
-    return &_probes[_probeCount++].ring;
-  }
-  _probes[0].id = uid;
-  return &_probes[0].ring;
-}
-
-bool SensorHandler::parseTelemetry(const String& body, float& co2, float& t, float& h, float& d) {
-  co2=t=h=d=NAN;
-  int start=0;
-  while (start < body.length()) {
-    int comma = body.indexOf(',', start);
-    String token = (comma<0) ? body.substring(start) : body.substring(start, comma);
-    token.trim();
-    int colon = token.indexOf(':');
-    if (colon>0) {
-      String key = token.substring(0, colon);
-      String val = token.substring(colon+1);
-      key.trim(); val.trim();
-      float fv = val.toFloat();
-      if (key.equalsIgnoreCase("CO2")) co2=fv;
-      else if (key.equalsIgnoreCase("TEMP")) t=fv;
-      else if (key.equalsIgnoreCase("HUM")) h=fv;
-      else if (key.equalsIgnoreCase("SOUND") || key.equalsIgnoreCase("DB")) d=fv;
-    }
-    if (comma<0) break;
-    start = comma+1;
-  }
-  return !(isnan(co2)&&isnan(t)&&isnan(h)&&isnan(d));
-}
-
-void SensorHandler::updateAreaLive(const String& probeId, float co2, float t, float h, float d) {
-  AreaConfig* area = _cfg->findAreaByProbe(probeId);
-  if (!area) return;
-  float vals[MET_COUNT] = {co2,t,h,d};
-  for (int m=0;m<MET_COUNT;m++) {
-    float v = vals[m];
-    if (isnan(v)) continue;
-    if (!area->rt.inited[m]) {
-      area->rt.inited[m]=true; area->rt.liveMin[m]=v; area->rt.liveMax[m]=v;
-    } else {
-      if (v < area->rt.liveMin[m]) area->rt.liveMin[m]=v;
-      if (v > area->rt.liveMax[m]) area->rt.liveMax[m]=v;
-    }
-  }
-}
-
-void SensorHandler::ackSensor(const String& s) {
-  if (_sensorSerial) {
-    _sensorSerial->println(s);
-    echoSensTX(s);
-  }
-}
-
-void SensorHandler::handleProbeAssignFromProbe(const String& probeId, const String& area, const String& loc) {
-  bool ok = _cfg->setProbe(up(probeId), up(area), up(loc));
-  String msg = String("PROBE ") + up(probeId) + " " + up(area) + " " + up(loc) + (ok ? " ACCEPTED" : " REJECTED");
-  ackSensor(msg);
-}
-
-void SensorHandler::handleSetProbes(const String& probeId, const String& area, const String& loc) {
-  bool ok = _cfg->setProbe(up(probeId), up(area), up(loc));
-  String msg = String("PROBES ") + up(probeId) + " " + up(area) + " " + up(loc) + (ok ? " ACCEPTED" : " REJECTED");
-  ackSensor(msg);
-  if (_diagSerial) {
-    _diagSerial->println(msg);
-    echoDiagTX(msg);
-  }
-}
-
-void SensorHandler::handleRemoveProbe(const String& probeId) {
-  bool ok = _cfg->removeProbe(up(probeId));
-  String msg = String("PROBE ") + up(probeId) + (ok ? " REMOVED" : " NOT_FOUND");
-  ackSensor(msg);
-  if (_diagSerial) {
-    _diagSerial->println(msg);
-    echoDiagTX(msg);
-  }
-}
-
-void SensorHandler::handleSensorLine(const String& lineIn) {
-  if (!lineIn.length()) return;
-  String line = lineIn; line.trim();
-
-  // Mirror incoming sensor UART messages to USB
-  Serial.print(nowStamp());
-  Serial.print("[SENS RX] ");
-  Serial.println(line);
-
-  // Accept "SET PROBES ..." from Sensor UART too
-  if (line.startsWith("SET PROBES ") || line.startsWith("set probes ") || line.startsWith("Set Probes ")) {
-    String rest = line.substring(line.indexOf(' ') + 1); // after SET
-    int sp1 = rest.indexOf(' '); if (sp1 < 0) return;
-    String rest2 = rest.substring(sp1+1); rest2.trim(); // after "PROBES "
-    int spA = rest2.indexOf(' ');
-    int spB = rest2.indexOf(' ', spA+1);
-    if (spA < 0 || spB < 0) return;
-    String probe = rest2.substring(0, spA);
-    String area  = rest2.substring(spA+1, spB);
-    String loc   = rest2.substring(spB+1);
-    handleSetProbes(probe, area, loc);
-    return;
-  }
-
-  // Accept "REMOVE PROBE {PROBE_ID}"
-  if (line.startsWith("REMOVE PROBE ") || line.startsWith("remove probe ") || line.startsWith("Remove Probe ")) {
-    String pid = line.substring(line.lastIndexOf(' ')+1);
-    pid.trim();
-    handleRemoveProbe(pid);
-    return;
-  }
-
-  // Probe self-assignment: "{PROBE_ID} SET PROBE AREA LOCATION"
-  int sp1 = line.indexOf(' ');
-  if (sp1 > 0) {
-    String first = line.substring(0, sp1);
-    int setIdx = line.indexOf(" SET PROBE ");
-    if (setIdx == (int)first.length()) {
-      String rest = line.substring(setIdx + 11);
-      rest.trim();
-      int sp = rest.indexOf(' ');
-      if (sp > 0) {
-        String area = rest.substring(0, sp);
-        String loc  = rest.substring(sp + 1);
-        handleProbeAssignFromProbe(first, area, loc);
-        return;
-      }
-    }
-  }
-
-  // Telemetry: "{PROBE_ID}: CO2:...,Temp:...,Hum:...,Sound:..."
+void SensorHandler::handleSensorMessage(const String& line) {
   int colon = line.indexOf(':');
-  if (colon > 0) {
-    String probeId = line.substring(0, colon);
-    String payload = line.substring(colon + 1);
-    payload.trim();
-    float co2, t, h, d;
-    if (parseTelemetry(payload, co2, t, h, d)) {
-      ProbeRing* r = upsertRing(probeId);
-      r->push(isnan(co2)?0:co2, isnan(t)?0:t, isnan(h)?0:h, isnan(d)?0:d, millis());
-      updateAreaLive(up(probeId), co2, t, h, d);
+  if (colon < 0) return;
+
+  String probeId = line.substring(0, colon);
+  probeId.trim();
+  probeId.toLowerCase(); // normalize for lookups
+
+  String payload = line.substring(colon + 1);
+  payload.trim();
+
+  // --- Handle SET PROBE command from probe UART ---
+  if (payload.startsWith("SET PROBE")) {
+    String rest = payload.substring(9);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    if (sp < 0) {
+      String err = "ERR: Bad SET PROBE syntax";
+      if (_sensorSerial) _sensorSerial->println(err);
+      _out->println(err);
+      echoDiagTX(err);
+      return;
     }
-    return;
+
+    String area = rest.substring(0, sp);
+    String loc  = rest.substring(sp + 1);
+    area.trim();
+    loc.trim();
+
+    if (_cfg->setProbe(probeId, area, loc)) {
+      if (_cfg->save()) {
+        String msg = "PROBE " + probeId + " " + area + " " + loc + " ACCEPTED";
+        if (_sensorSerial) _sensorSerial->println(msg);   // send ACK to sensors UART
+        _out->println(msg);                               // show on USB serial
+        echoDiagTX(msg);                                  // show on diag serial
+      } else {
+        String msg = "ERR: Failed to save config after setting probe " + probeId;
+        if (_sensorSerial) _sensorSerial->println(msg);
+        _out->println(msg);
+        echoDiagTX(msg);
+      }
+    } else {
+      String msg = "ERR: Failed to set probe " + probeId;
+      if (_sensorSerial) _sensorSerial->println(msg);
+      _out->println(msg);
+      echoDiagTX(msg);
+    }
+    return; // handled, don't parse as sensor data
   }
 
-  // Unknown line: mirror to diagnostics for visibility
-  if (_diagSerial) {
-    _diagSerial->println(String("UNPARSED SENSOR: ") + line);
-    echoDiagTX(String("UNPARSED SENSOR: ") + line);
+  // --- Otherwise, expect sensor data like "CO2:451,Temp:26.7,Hum:58.7,Sound:45" ---
+  float co2 = NAN, temp = NAN, hum = NAN, db = NAN;
+
+  int idx = 0;
+  while (idx < payload.length()) {
+    int comma = payload.indexOf(',', idx);
+    String token = (comma == -1) ? payload.substring(idx) : payload.substring(idx, comma);
+    token.trim();
+
+    int sep = token.indexOf(':');
+    if (sep > 0) {
+      String key = token.substring(0, sep);
+      String val = token.substring(sep + 1);
+      key.trim(); val.trim();
+      float fval = val.toFloat();
+
+      if (key.equalsIgnoreCase("CO2"))   co2  = fval;
+      else if (key.equalsIgnoreCase("TEMP")) temp = fval;
+      else if (key.equalsIgnoreCase("HUM"))  hum  = fval;
+      else if (key.equalsIgnoreCase("SOUND") || key.equalsIgnoreCase("DB")) db = fval;
+    }
+    if (comma == -1) break;
+    idx = comma + 1;
   }
+
+  if (!isnan(co2)) updateHistory(probeId, MET_CO2, co2);
+  if (!isnan(temp)) updateHistory(probeId, MET_TEMP, temp);
+  if (!isnan(hum))  updateHistory(probeId, MET_HUM, hum);
+  if (!isnan(db))   updateHistory(probeId, MET_DB, db);
+
+  String updateMsg = probeId + " updated";
+  _out->println("[DATA]" + updateMsg);
+}
+
+// ================================================================
+//  History management
+// ================================================================
+void SensorHandler::updateHistory(const String& probe, Metric m, float value) {
+  _history[probe][m].push_back(value);
+  if (_history[probe][m].size() > 10)
+    _history[probe][m].erase(_history[probe][m].begin());
+
+  updateAreaStats(probe, m, value);
+}
+
+// ================================================================
+//  Update area min/max based on incoming values
+// ================================================================
+void SensorHandler::updateAreaStats(const String& probe, Metric m, float value) {
+  AreaConfig* area = _cfg->findAreaByProbe(probe);
+  if (!area) return;
+
+  if (!area->rt.inited[m]) {
+    area->rt.liveMin[m] = value;
+    area->rt.liveMax[m] = value;
+    area->rt.inited[m]  = true;
+  } else {
+    if (value < area->rt.liveMin[m]) area->rt.liveMin[m] = value;
+    if (value > area->rt.liveMax[m]) area->rt.liveMax[m] = value;
+  }
+
+  _cfg->save();
+}
+
+// ================================================================
+//  History accessors
+// ================================================================
+bool SensorHandler::getHistory(const String& probe, Metric m, std::vector<float>& out) {
+  String key = probe; key.toLowerCase();
+  auto itProbe = _history.find(key);
+  if (itProbe == _history.end()) return false;
+  auto itMetric = itProbe->second.find(m);
+  if (itMetric == itProbe->second.end()) return false;
+  out = itMetric->second;
+  return true;
+}
+
+bool SensorHandler::getAllHistory(const String& probe, std::vector<std::pair<Metric,std::vector<float>>>& out) {
+  String key = probe; key.toLowerCase();
+  auto itProbe = _history.find(key);
+  if (itProbe == _history.end()) return false;
+  out.clear();
+  for (auto& kv : itProbe->second) {
+    out.push_back(kv);
+  }
+  return true;
 }

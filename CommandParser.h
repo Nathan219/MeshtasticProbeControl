@@ -2,42 +2,49 @@
 #include <Arduino.h>
 #include "ConfigManager.h"
 #include "SensorHandler.h"
+#include "Metrics.h"
 
-#define STATS_MESSAGE_INTERVAL_MS 10000  // 10 seconds between STAT lines
 
+struct StatsJob {
+  bool active = false;
+  size_t areaIndex = 0;
+  int metricIndex = 0;
+  unsigned long lastSend = 0;
+};
+
+// ================================================================
+//  CommandParser
+// ================================================================
+//
+// Handles text commands coming from diagnostics UART or USB serial.
+// Examples:
+//   GET STATS
+//   GET STATS FLOOR11
+//   GET HISTORY DFE8
+//   SET OVERRIDE FLOOR11 MAX 800
+//   SET THRESHOLD FLOOR11 CO2 3 500
+// ================================================================
 class CommandParser {
 public:
-  CommandParser(ConfigManager* cfg, SensorHandler* sens, HardwareSerial* out)
-    : _cfg(cfg), _sens(sens), _out(out) {}
+  CommandParser(ConfigManager* cfg, SensorHandler* sens, HardwareSerial* diag, Stream* usb)
+    : _cfg(cfg), _sensors(sens), _diag(diag), _usb(usb) {}
 
-  void handleCommand(const String& line);
-  void processStatsJob();  // call periodically from loop()
+  void handleCommand(const String& line) ;
+  void processStatsJob();
 
 private:
-  ConfigManager*  _cfg;
-  SensorHandler*  _sens;
-  HardwareSerial* _out;
+  ConfigManager*   _cfg;
+  SensorHandler*   _sensors;
+  HardwareSerial*  _diag;
+  Stream*          _usb;
+  StatsJob         _statsJob;
+  bool _sendingStats = false;
+  int  _sendIndex = 0;
 
-  struct StatsJob {
-    bool active = false;
-    unsigned long lastSent = 0;
-    size_t areaIndex = 0;
-    size_t metricIndex = 0;
-  } _statsJob;
+  unsigned long _lastStatsSent = 0;
+  unsigned long _statsIntervalMs = 10000;  // 10 s default interval
 
-  // command handlers
-  void cmdGetAreas();
-  void cmdGetStats();
-  void cmdGetThreshold();
-  void cmdGetUseBaseline(const String& area);
-  void cmdSetUseBaseline(const String& area, bool on);
-  void cmdSetOverride(const String& area, bool isMin, float val);
-  void cmdSetThreshold(const String& area, Metric m, int pix, float val);
-  void cmdSetProbes(const String& probe, const String& area, const String& loc);
-  void cmdRemoveProbe(const String& probe);
-  void cmdGetStatsInterval();                        // ✅ added
-  void cmdSetStatsInterval(unsigned long val);       // ✅ added
-
+  void sendDiag(const String& msg);
+  void sendUSB(const String& msg);
   void printStatLine(const AreaConfig& a, Metric m);
-
 };

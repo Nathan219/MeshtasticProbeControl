@@ -1,161 +1,308 @@
 #include "CommandParser.h"
-#include "Baselines.h"
+#include "Metrics.h"
 
-// ================================================================
-//  Timestamped debug helpers
-// ================================================================
-static String nowStamp() {
-  unsigned long ms = millis();
-  unsigned long s = ms / 1000;
-  unsigned long m = s / 60;
-  char buf[20];
-  snprintf(buf, sizeof(buf), "[%02lu:%02lu.%03lu] ", m % 60, s % 60, ms % 1000);
-  return String(buf);
+#define MESSAGE_DELAY     2000
+
+void CommandParser::sendDiag(const String& msg) {
+  if (_diag){
+    _diag->flush();
+    _diag->println(msg);
+    _diag->flush();
+  }
+  delay(MESSAGE_DELAY);
 }
-static void echoDiagTX(const String& msg) {
-  Serial.print(nowStamp());
-  Serial.print("[DIAG TX] ");
-  Serial.println(msg);
+
+void CommandParser::sendUSB(const String& msg) {
+  if (_usb) _usb->println("[DIAG TX] " + msg);
 }
 
 // ================================================================
-//  Small utilities
+//  handleCommand
 // ================================================================
-static bool parseBoolToken(const String& s, bool& out) {
-  if (s.equalsIgnoreCase("true") || s == "1") { out = true;  return true; }
-  if (s.equalsIgnoreCase("false")|| s == "0") { out = false; return true; }
-  return false;
-}
-static String up(const String& s){ String o=s; o.toUpperCase(); return o; }
+void CommandParser::handleCommand(const String& line)  {
+  String cmd = line;   // make a local, mutable copy
+  cmd.trim();
 
-// ================================================================
-//  Handle incoming diagnostic UART commands
-// ================================================================
-void CommandParser::handleCommand(const String& raw) {
-  String line = raw;
-  line.trim();
+  // ✅ Strip Meshtastic short-name prefix (like "ABCD:" or "💧7:")
+  int colonPos = cmd.indexOf(':');
+  if (colonPos != -1 && colonPos <= 4) {
+    cmd = cmd.substring(colonPos + 1);
+    cmd.trim();
+  }
 
-  // Strip Meshtastic shortname prefix like "A4B2:"
-  int colon = line.indexOf(':');
-  if (colon > 0 && colon <= 6) {
-    String prefix = line.substring(0, colon);
-    if (!prefix.equalsIgnoreCase("SET") && !prefix.equalsIgnoreCase("GET")) {
-      line = line.substring(colon + 1);
-      line.trim();
-      Serial.print(nowStamp());
-      Serial.print("[DIAG CMD] Stripped prefix: ");
-      Serial.println(prefix);
+  cmd.replace("\r", "");
+  cmd.replace("\n", "");
+
+
+  // --------------------------------------------------------------
+  // GET STATS
+  // --------------------------------------------------------------
+  if (cmd.equalsIgnoreCase("GET STATS")) {
+    if (_statsJob.active) {
+      sendUSB("ERR: Stats job already running");
+      return;
     }
+
+    _statsJob.active = true;
+    _statsJob.areaIndex = 0;
+    _statsJob.metricIndex = 0;
+    _statsJob.lastSend = 0;
+    sendUSB("GET STATS started (1s interval)");
+    return;
   }
 
-  if (line.length()) {
-    Serial.print(nowStamp());
-    Serial.print("[DIAG CMD] Parsed as: ");
-    Serial.println(line);
-  } else return;
-
-  // === Command matching ===
-  if (line.equalsIgnoreCase("GET AREAS")) { cmdGetAreas(); return; }
-  if (line.startsWith("GET STATS")) { cmdGetStats(); return; }
-  if (line.startsWith("GET THRESHOLD")) { cmdGetThreshold(); return; }
-  if (line.equalsIgnoreCase("GET STATS_INTERVAL")) { cmdGetStatsInterval(); return; }
-
-  if (line.startsWith("GET USE_BASELINE ")) {
-    String area = line.substring(17); area.trim();
-    cmdGetUseBaseline(area); return;
-  }
-
-  if (line.startsWith("SET USE_BASELINE ")) {
-    String rest = line.substring(17); rest.trim();
-    int sp = rest.lastIndexOf(' ');
-    if (sp > 0) {
-      String area = rest.substring(0, sp);
-      String btok = rest.substring(sp+1);
-      bool on=false; if (parseBoolToken(btok, on)) { cmdSetUseBaseline(area, on); return; }
+  // --------------------------------------------------------------
+  // GET STATS {AREA}
+  // --------------------------------------------------------------
+  if (cmd.startsWith("GET STATS ")) {
+    String areaName = cmd.substring(10);
+    areaName.trim();
+    AreaConfig* a = _cfg->findAreaByName(areaName);
+    if (!a) {
+      sendDiag("ERR: Unknown area " + areaName);
+      sendUSB("ERR: Unknown area " + areaName);
+      return;
     }
-  }
-
-  if (line.startsWith("SET STATS_INTERVAL ")) {
-    unsigned long val = line.substring(19).toInt();
-    if (val > 0) { cmdSetStatsInterval(val); return; }
-  }
-
-  if (line.startsWith("SET OVERRIDE ")) {
-    String rest = line.substring(13);
-    int sp1 = rest.lastIndexOf(' ');
-    if (sp1>0) {
-      float val = rest.substring(sp1+1).toFloat();
-      String mid = rest.substring(0, sp1); mid.trim();
-      int sp2 = mid.lastIndexOf(' ');
-      if (sp2>0) {
-        String minmax = mid.substring(sp2+1);
-        String area   = mid.substring(0, sp2);
-        bool isMin = minmax.equalsIgnoreCase("MIN");
-        bool isMax = minmax.equalsIgnoreCase("MAX");
-        if ((isMin||isMax) && area.length()) { cmdSetOverride(area, isMin, val); return; }
-      }
+    for (int i = 0; i < MET_COUNT; i++) {
+      printStatLine(*a, static_cast<Metric>(i));
+      // delay(MESSAGE_DELAY);
     }
+    return;
   }
 
-  if (line.startsWith("SET THRESHOLD ")) {
-    String rest = line.substring(14);
+  // --------------------------------------------------------------
+  // GET AREAS
+  // --------------------------------------------------------------
+  if (cmd.equalsIgnoreCase("GET AREAS")) {
+    for (auto& a : _cfg->areas()) {
+      String msg = "AREA: " + a.name;
+      if (a.location.length()) msg += " " + a.location;
+      if (a.probeId.length()) msg += " " + a.probeId;
+      sendDiag(msg);
+      sendUSB(msg);
+      // delay(MESSAGE_DELAY);
+    }
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // REMOVE PROBE {ID}
+  // --------------------------------------------------------------
+  if (cmd.startsWith("REMOVE PROBE ")) {
+    String probeId = cmd.substring(13);
+    probeId.trim();
+    if (_cfg->removeProbe(probeId)) {
+      String msg = "PROBE " + probeId + " REMOVED";
+      sendDiag(msg);
+      sendUSB(msg);
+    } else {
+      sendDiag("ERR: Probe not found " + probeId);
+      sendUSB("ERR: Probe not found " + probeId);
+    }
+    return;
+  }
+
+  // ==========================================
+  // GET THRESHOLDS {AREA_NAME}
+  // ==========================================
+  if (cmd.startsWith("GET THRESHOLDS")) {
+    String area = cmd.substring(14);
+    area.trim();
+    if (area.isEmpty()) {
+      sendDiag("ERR: Missing area name");
+      return;
+    }
+
+    AreaConfig* a = _cfg->findAreaByName(area);
+    if (!a) {
+      sendDiag("ERR: Unknown area " + area);
+      return;
+    }
+
+    for (int mi = 0; mi < MET_COUNT; mi++) {
+      Metric m = static_cast<Metric>(mi);
+      String msg = "THRESHOLD " + a->name + " " + metricToString(m);
+      for (int i = 0; i < 6; i++)
+        msg += " " + String(a->thresholds[m].values[i], 2);
+
+      sendDiag(msg);
+      sendUSB(msg);
+      delay(50); // small pacing delay to prevent overflow
+    }
+    return;
+  }
+  
+  auto interpretThreshold = [](float v) -> String {
+    if (v < 0) return "unused";
+    if (v < 1.0f) return String(v * 100.0f, 1) + "%";
+    return String(v, 1);
+  };
+
+  if (cmd.startsWith("SET THRESHOLD")) {
+    String rest = cmd.substring(13);
+    rest.trim();
+
     int sp1 = rest.indexOf(' ');
-    if (sp1>0) {
-      String area = rest.substring(0, sp1);
-      String rest2 = rest.substring(sp1+1); rest2.trim();
-      int sp2 = rest2.indexOf(' ');
-      int sp3 = rest2.lastIndexOf(' ');
-      if (sp2>0 && sp3>sp2) {
-        Metric m = metricFromString(rest2.substring(0, sp2));
-        int pix  = rest2.substring(sp2+1, sp3).toInt();
-        float v  = rest2.substring(sp3+1).toFloat();
-        if (m != MET_COUNT && pix >=1 && pix<=6) { cmdSetThreshold(area, m, pix, v); return; }
+    if (sp1 < 0) { sendDiag("ERR: Missing area"); sendUSB("ERR: Missing area"); return; }
+
+    String area = rest.substring(0, sp1);
+    String r2 = rest.substring(sp1 + 1);
+    r2.trim();
+
+    int sp2 = r2.indexOf(' ');
+    if (sp2 < 0) { sendDiag("ERR: Missing metric"); sendUSB("ERR: Missing metric"); return; }
+
+    String met = r2.substring(0, sp2);
+    Metric m = metricFromString(met);
+    if (m == MET_INVALID) { sendDiag("ERR: Invalid metric"); sendUSB("ERR: Invalid metric"); return; }
+
+    String r3 = r2.substring(sp2 + 1);
+    r3.trim();
+
+    // --- Multi-value form (comma separated) ---
+    if (r3.indexOf(',') >= 0) {
+      float vals[6] = {-1, -1, -1, -1, -1, -1};
+      int count = 0;
+
+      while (r3.length() > 0 && count < 6) {
+        int comma = r3.indexOf(',');
+        String tok = (comma == -1) ? r3 : r3.substring(0, comma);
+        tok.trim();
+        float v = tok.toFloat();
+        vals[count++] = v;
+        if (comma == -1) break;
+        r3 = r3.substring(comma + 1);
+        r3.trim();
       }
+
+      for (int i = 0; i < count; i++) _cfg->setThreshold(area, m, i + 1, vals[i]);
+      _cfg->save();
+
+      String msg = "THRESHOLD " + area + " " + metricToString(m) + " [";
+      for (int i = 0; i < count; i++) {
+        if (i) msg += ", ";
+        msg += interpretThreshold(vals[i]);
+      }
+      msg += "] ACCEPTED";
+      sendDiag(msg);
+      sendUSB(msg);
+      return;
     }
-  }
 
-  if (line.startsWith("SET PROBES ")) {
-    String rest = line.substring(11); rest.trim();
-    int sp1 = rest.indexOf(' ');
-    int sp2 = rest.indexOf(' ', sp1+1);
-    if (sp1>0 && sp2>sp1) {
-      String probe = rest.substring(0, sp1);
-      String area  = rest.substring(sp1+1, sp2);
-      String loc   = rest.substring(sp2+1);
-      cmdSetProbes(probe, area, loc); return;
+    // --- Single pixel/value form ---
+    int sp3 = r3.indexOf(' ');
+    if (sp3 < 0) {
+      sendDiag("ERR: Missing pixel/value");
+      sendUSB("ERR: Missing pixel/value");
+      return;
     }
+
+    int pix = r3.substring(0, sp3).toInt();
+    float val = r3.substring(sp3 + 1).toFloat();
+
+    if (!_cfg->setThreshold(area, m, pix, val)) {
+      sendDiag("ERR: Failed to set threshold");
+      sendUSB("ERR: Failed to set threshold");
+      return;
+    }
+
+    _cfg->save();
+
+    String msg = "THRESHOLD " + area + " " + metricToString(m) +
+                " " + String(pix) + " " + interpretThreshold(val) + " ACCEPTED";
+    sendDiag(msg);
+    sendUSB(msg);
+    return;
   }
 
-  if (line.startsWith("REMOVE PROBE ")) {
-    String pid = line.substring(13); pid.trim();
-    cmdRemoveProbe(pid); return;
+
+
+  // --------------------------------------------------------------
+  // GET HISTORY {PROBE}
+  // --------------------------------------------------------------
+  if (cmd.startsWith("GET HISTORY")) {
+    String arg = cmd.substring(11);
+    arg.trim();
+    if (arg.isEmpty()) {
+      sendDiag("ERR: Missing probe id");
+      sendUSB("ERR: Missing probe id");
+      return;
+    }
+
+    std::vector<std::pair<Metric, std::vector<float>>> data;
+    if (_sensors->getAllHistory(arg, data)) {
+      for (auto& kv : data) {
+        String msg = "HIST " + arg + " " + metricToString(kv.first) + ":";
+        for (float v : kv.second) msg += " " + String(v, 1);
+        sendDiag(msg);
+        sendUSB(msg);
+        delay(50);
+      }
+    } else {
+      sendDiag("ERR: No history for " + arg);
+      sendUSB("ERR: No history for " + arg);
+    }
+    return;
   }
 
-  String msg = String("ERR: Unrecognized command: ") + line;
-  _out->println(msg);
-  echoDiagTX(msg);
+  // --------------------------------------------------------------
+  // SET USE_BASELINE {AREA} {True/False}
+  // --------------------------------------------------------------
+  if (cmd.startsWith("SET USE_BASELINE ")) {
+    String rest = cmd.substring(17);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    if (sp < 0) return;
+    String area = rest.substring(0, sp);
+    String valStr = rest.substring(sp + 1);
+    bool flag = valStr.equalsIgnoreCase("1") || valStr.equalsIgnoreCase("true");
+    _cfg->setUseBaseline(area, flag);
+    String msg = "USE_BASELINE " + area + " " + String(flag ? "True" : "False") + " ACCEPTED";
+    sendDiag(msg);
+    sendUSB(msg);
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // GET USE_BASELINE {AREA}
+  // --------------------------------------------------------------
+  if (cmd.startsWith("GET USE_BASELINE ")) {
+    String area = cmd.substring(17);
+    area.trim();
+    bool flag = false;
+    _cfg->getUseBaseline(area, flag);
+    String msg = "USE_BASELINE " + area + " " + String(flag ? "True" : "False");
+    sendDiag(msg);
+    sendUSB(msg);
+    return;
+  }
+
+  sendDiag("ERR: Unrecognized command: " + cmd);
+  sendUSB("ERR: Unrecognized command: " + cmd);
 }
 
 // ================================================================
-//  Non-blocking STATS scheduler
+//  processStatsJob
 // ================================================================
 void CommandParser::processStatsJob() {
   if (!_statsJob.active) return;
 
   unsigned long now = millis();
-  if (now - _statsJob.lastSent < _cfg->getStatsInterval()) return;
+  const unsigned long delayMs = 1000;  // 1s between each STAT
 
-  if (_statsJob.areaIndex >= _cfg->areas().size()) {
+  if (now - _statsJob.lastSend < delayMs) return;
+  _statsJob.lastSend = now;
+
+  auto& areas = _cfg->areas();
+  if (_statsJob.areaIndex >= areas.size()) {
     _statsJob.active = false;
-    String msg = "STAT job complete";
-    _out->println(msg);
-    echoDiagTX(msg);
+    sendUSB("GET STATS done.");
     return;
   }
 
-  AreaConfig& a = _cfg->areas()[_statsJob.areaIndex];
-  printStatLine(a, (Metric)_statsJob.metricIndex);
-  _statsJob.lastSent = now;
+  AreaConfig& a = areas[_statsJob.areaIndex];
+  Metric m = static_cast<Metric>(_statsJob.metricIndex);
+  printStatLine(a, m);
 
   _statsJob.metricIndex++;
   if (_statsJob.metricIndex >= MET_COUNT) {
@@ -165,160 +312,15 @@ void CommandParser::processStatsJob() {
 }
 
 // ================================================================
-//  GET commands
+//  printStatLine
 // ================================================================
-void CommandParser::cmdGetAreas() {
-  for (auto& a : _cfg->areas()) {
-    String msg = String("AREA: ") + a.name + " " + a.location + " " + a.probeId;
-    _out->println(msg);
-    echoDiagTX(msg);
-  }
-}
-
-void CommandParser::cmdGetStats() {
-  _statsJob.active = true;
-  _statsJob.lastSent = 0;
-  _statsJob.areaIndex = 0;
-  _statsJob.metricIndex = 0;
-  String msg = "STAT job started";
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-void CommandParser::cmdGetThreshold() {
-  for (auto& a : _cfg->areas()) {
-    for (int m=0;m<MET_COUNT;m++) {
-      String msg = String("THRESHOLD ") + a.name + " " + metricToString((Metric)m);
-      for (int i=0;i<6;i++) { msg += " " + String(a.thresholds[m].values[i],2); }
-      _out->println(msg);
-      echoDiagTX(msg);
-    }
-  }
-}
-
-void CommandParser::cmdGetUseBaseline(const String& area) {
-  bool b=false;
-  String msg;
-  if (_cfg->getUseBaseline(area, b)) {
-    msg = String("USE_BASELINE ") + up(area) + " " + (b ? "True" : "False");
-  } else {
-    msg = String("USE_BASELINE ") + up(area) + " NOT_FOUND";
-  }
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-void CommandParser::cmdGetStatsInterval() {
-  unsigned long val = _cfg->getStatsInterval();
-  String msg = String("STATS_INTERVAL ") + String(val);
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-// ================================================================
-//  SET commands
-// ================================================================
-void CommandParser::cmdSetUseBaseline(const String& area, bool on) {
-  String msg;
-  if (_cfg->setUseBaseline(area, on)) {
-    msg = String("USE_BASELINE ") + up(area) + " " + (on ? "True" : "False") + " ACCEPTED";
-  } else {
-    msg = String("USE_BASELINE ") + up(area) + " REJECTED";
-  }
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-void CommandParser::cmdSetOverride(const String& area, bool isMin, float val) {
-  String msg;
-  if (_cfg->setOverride(area, isMin, val)) {
-    msg = String("OVERRIDE ") + up(area) + " " + (isMin ? "MIN " : "MAX ") + String(val,2) + " ACCEPTED";
-  } else {
-    msg = String("OVERRIDE ") + up(area) + " REJECTED";
-  }
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-void CommandParser::cmdSetThreshold(const String& area, Metric m, int pix, float val) {
-  String msg;
-  if (_cfg->setThreshold(area, m, pix, val)) {
-    msg = String("THRESHOLD ") + up(area) + " " + metricToString(m) + " " +
-          String(pix) + " " + String(val,2) + " ACCEPTED";
-  } else {
-    msg = String("THRESHOLD ") + up(area) + " REJECTED";
-  }
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-void CommandParser::cmdSetProbes(const String& probe, const String& area, const String& loc) {
-  String msg;
-  if (_cfg->setProbe(probe, area, loc)) {
-    msg = String("PROBES ") + up(probe) + " " + up(area) + " " + up(loc) + " ACCEPTED";
-  } else {
-    msg = String("PROBES ") + up(probe) + " " + up(area) + " " + up(loc) + " REJECTED";
-  }
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-void CommandParser::cmdRemoveProbe(const String& probe) {
-  String msg;
-  if (_cfg->removeProbe(probe)) {
-    msg = String("PROBE ") + up(probe) + " REMOVED";
-  } else {
-    msg = String("PROBE ") + up(probe) + " NOT_FOUND";
-  }
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-void CommandParser::cmdSetStatsInterval(unsigned long val) {
-  String msg;
-  if (_cfg->setStatsInterval(val)) {
-    msg = String("STATS_INTERVAL SET TO ") + String(val) + " ACCEPTED";
-  } else {
-    msg = "STATS_INTERVAL REJECTED (valid range 1000–60000)";
-  }
-  _out->println(msg);
-  echoDiagTX(msg);
-}
-
-// ================================================================
-//  printStatLine helper
-// ================================================================
-static void chooseMinMaxForStat(const AreaConfig& a, Metric m, float& outMin, float& outMax, bool& usedBaseline) {
-  usedBaseline = false;
-  bool haveLive = a.rt.inited[m];
-  float bMin=0,bMax=0;
-  switch (m) {
-    case MET_CO2:  bMin=BASELINE_CO2_MIN; bMax=BASELINE_CO2_MAX; break;
-    case MET_TEMP: bMin=BASELINE_TEMP_MIN; bMax=BASELINE_TEMP_MAX; break;
-    case MET_HUM:  bMin=BASELINE_HUM_MIN;  bMax=BASELINE_HUM_MAX;  break;
-    case MET_DB:   bMin=BASELINE_DB_MIN;   bMax=BASELINE_DB_MAX;   break;
-    default: break;
-  }
-  if (a.useBaseline) {
-    if (haveLive && a.rt.liveMax[m] >= (BASELINE_NEAR_FRACTION * bMax)) {
-      outMin = a.rt.liveMin[m]; outMax = a.rt.liveMax[m];
-      usedBaseline = true; return;
-    }
-    outMin = bMin; outMax = bMax; usedBaseline = true;
-  } else if (haveLive) {
-    outMin = a.rt.liveMin[m]; outMax = a.rt.liveMax[m];
-  } else {
-    outMin = bMin; outMax = bMax; usedBaseline = false;
-  }
-}
-
 void CommandParser::printStatLine(const AreaConfig& a, Metric m) {
-  float mn=0,mx=0; bool usedBase=false;
-  chooseMinMaxForStat(a, m, mn, mx, usedBase);
-  String msg = String("STAT: ") + a.name + " " + metricToString(m) +
-    " min:" + String(mn,2) + " max:" + String(mx,2) +
-    " min_o:" + String(a.overrideMin,2) + " max_o:" + String(a.overrideMax,2) +
-    " baseline:" + (a.useBaseline ? "true" : "false");
-  _out->println(msg);
-  echoDiagTX(msg);
+  String msg = "STAT: " + a.name + " " + metricToString(m) +
+               " min:" + String(a.rt.liveMin[m], 1) +
+               " max:" + String(a.rt.liveMax[m], 1) +
+               " min_o:" + String(a.overrideMin, 1) +
+               " max_o:" + String(a.overrideMax, 1);
+
+  sendDiag(msg);
+  sendUSB(msg);
 }

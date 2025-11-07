@@ -1,84 +1,64 @@
 #pragma once
 #include <Arduino.h>
-#include <ArduinoJson.h>
-#include <LittleFS.h>
 #include <vector>
+#include <ArduinoJson.h>
+#include "Metrics.h"
 
 // ================================================================
-//  Metric Enumeration
-// ================================================================
-enum Metric {
-  MET_CO2 = 0,
-  MET_TEMP,
-  MET_HUM,
-  MET_DB,
-  MET_COUNT
-};
-
-// Forward declarations
-Metric metricFromString(const String& s);
-const char* metricToString(Metric m);
-
-// ================================================================
-//  Data Structures
+//  Threshold & runtime data
 // ================================================================
 struct ThresholdSet {
-  float values[6];
+  float values[6] = {-1,-1,-1,-1,-1,-1};
 };
 
-struct RealtimeStats {
+struct AreaRuntime {
   bool  inited[MET_COUNT] = {false,false,false,false};
-  float liveMin[MET_COUNT] = {0,0,0,0};
-  float liveMax[MET_COUNT] = {0,0,0,0};
+  float liveMin[MET_COUNT] = {0};
+  float liveMax[MET_COUNT] = {0};
 };
 
 struct AreaConfig {
   String name;
   String location;
   String probeId;
-  float minBase = 0.0f;
-  float maxBase = 1.0f;
-  float overrideMin = -1.0f;
-  float overrideMax = -1.0f;
-  bool useBaseline = true;
+  AreaRuntime rt;
+  float overrideMin;
+  float overrideMax;
+  bool useBaseline;
+
   ThresholdSet thresholds[MET_COUNT];
-  RealtimeStats rt;
 };
 
 // ================================================================
-//  Config Manager
+//  ConfigManager
 // ================================================================
 class ConfigManager {
 public:
-  bool begin();
+  ConfigManager() {}
+
+  bool loadFromFS();
   bool save();
+  void ensureDefaults();
+  void toJson(JsonDocument& doc);
 
+  // --- Area management ---
   std::vector<AreaConfig>& areas() { return _areas; }
-
-  // Area management
   AreaConfig* findAreaByName(const String& name);
-  AreaConfig* findAreaByProbe(const String& probeId);
-  bool setProbe(const String& probeId, const String& areaName, const String& location);
-  bool removeProbe(const String& probeId);
+  AreaConfig* findAreaByProbe(const String& probe);
 
-  // Settings
-  bool setOverride(const String& areaName, bool isMin, float value);
-  bool setThreshold(const String& areaName, Metric m, int pixelIndex1to6, float value);
-  bool setUseBaseline(const String& areaName, bool enabled);
-  bool getUseBaseline(const String& areaName, bool& out);
+  bool setProbe(const String& probe, const String& area, const String& loc);
+  bool removeProbe(const String& probe);
 
-  // Stats interval configuration
+  bool setOverride(const String& area, bool isMin, float val);
+  bool setThreshold(const String& area, Metric m, int pix, float val);
+  float getThreshold(const String& area, Metric m, int pix) const;
+  bool getUseBaseline(const String& area, bool& out);
+  bool setUseBaseline(const String& area, bool val);
+
   bool setStatsInterval(unsigned long val);
   unsigned long getStatsInterval() const;
 
 private:
   std::vector<AreaConfig> _areas;
-  unsigned long statsIntervalMs = 10000; // default 10s
-
-  // JSON helpers
-  bool loadFromFS();
-  bool writeToFS();
-  void toJson(JsonDocument& doc);
-  void loadAreaFromJson(AreaConfig& a, JsonObject obj);
-  void ensureDefaults();
+  unsigned long statsIntervalMs = 10000;
 };

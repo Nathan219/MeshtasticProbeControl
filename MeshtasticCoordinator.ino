@@ -43,85 +43,137 @@
 // ================================================================
 
 #include <Arduino.h>
-#include "Baselines.h"
+#include <LittleFS.h>
 #include "ConfigManager.h"
 #include "SensorHandler.h"
 #include "CommandParser.h"
 
-// =======================
-// --- UART CONFIG ---
-// =======================
-#define UART_BAUD        115200
-#define DIAG_RX_PIN      5
-#define DIAG_TX_PIN      6
-#define SENSOR_RX_PIN    2
-#define SENSOR_TX_PIN    3
+// ================================================================
+// --- UART CONFIGURATION ---
+// ================================================================
+#define SENSOR_RX_PIN 2
+#define SENSOR_TX_PIN 3
+#define DIAG_RX_PIN   5
+#define DIAG_TX_PIN   6
+#define BAUD_RATE     38400
 
-HardwareSerial DiagSerial(2);  // UART2 for diagnostics
-HardwareSerial SensorSerial(1); // UART1 for sensors
+// ================================================================
+// --- TIMING CONFIGURATION ---
+// ================================================================
+#define LOOP_DELAY_MS 10  // Base delay for loop
+#define STATS_JOB_INTERVAL_MS 10000  // Default interval for stats updates
+
+// ================================================================
+// --- OBJECTS ---
+// ================================================================
+HardwareSerial SensorSerial(1);
+HardwareSerial DiagSerial(2);
 
 ConfigManager CONFIG;
-SensorHandler SENSORS(&CONFIG);
-CommandParser PARSER(&CONFIG, &SENSORS, &DiagSerial);
+SensorHandler* SENSORS = nullptr;
+CommandParser* PARSER = nullptr;
 
+// ================================================================
+// --- DIAGNOSTIC ECHO (shared utility) ---
+// ================================================================
+void echoDiagTX(const String& msg) {
+  unsigned long now = millis();
+  char buf[16];
+  snprintf(buf, sizeof(buf), "[%02lu:%02lu.%03lu]",
+           (now / 60000UL) % 60,
+           (now / 1000UL) % 60,
+           now % 1000);
+  String full = String(buf) + " [DIAG TX] " + msg;
+
+  Serial.println(full);  // USB console
+  DiagSerial.println(full);  // send to diagnostics UART
+}
+
+// ================================================================
+// --- SETUP ---
+// ================================================================
 void setup() {
   Serial.begin(115200);
-  delay(100);
-  DiagSerial.begin(UART_BAUD, SERIAL_8N1, DIAG_RX_PIN, DIAG_TX_PIN);
-  SensorSerial.begin(UART_BAUD, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
+  delay(1000);
+  Serial.println("\n[BOOT] Meshtastic Coordinator starting...");
 
-  Serial.println("[BOOT] MeshtasticCoordinator starting...");
-  DiagSerial.println("READY");
-
-  if (!CONFIG.begin()) {
-    Serial.println("[ERR] Config init failed.");
-    DiagSerial.println("ERR CONFIG");
-  } else {
-    Serial.println("[OK] Config init complete.");
+  // --- Initialize filesystem ---
+  if (!LittleFS.begin()) {
+    Serial.println("[ERR] LittleFS mount failed, formatting...");
+    LittleFS.format();
+    LittleFS.begin();
   }
 
-  SENSORS.setSensorSerial(&SensorSerial);
-  SENSORS.setDiagSerial(&DiagSerial);
-}
-// ================================================================
-//  Helper: timestamped debug prefix
-// ================================================================
-String nowStamp() {
-  unsigned long ms = millis();
-  unsigned long s = ms / 1000;
-  unsigned long m = s / 60;
-  unsigned long h = m / 60;
-  char buf[16];
-  snprintf(buf, sizeof(buf), "[%02lu:%02lu.%03lu] ", m % 60, s % 60, ms % 1000);
-  return String(buf);
+  // --- Initialize UARTs ---
+  SensorSerial.begin(BAUD_RATE, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
+  DiagSerial.begin(BAUD_RATE, SERIAL_8N1, DIAG_RX_PIN, DIAG_TX_PIN);
+
+  Serial.println("[INIT] UARTs configured");
+  Serial.println("[INIT] Loading configuration...");
+
+  // --- Load or create config ---
+  CONFIG.loadFromFS();
+  CONFIG.ensureDefaults();
+  CONFIG.save();
+
+  // --- Create handlers ---
+  SENSORS = new SensorHandler(&CONFIG, &Serial);
+  SENSORS->setSensorSerial(&SensorSerial);
+  SENSORS->setDiagSerial(&DiagSerial);
+
+  PARSER = new CommandParser(&CONFIG, SENSORS, &DiagSerial, &Serial);
+
+  Serial.println("[INIT] Setup complete. Coordinator ready.");
+  echoDiagTX("Coordinator boot complete.");
 }
 
+// ================================================================
+// --- LOOP ---
+// ================================================================
 void loop() {
-  // Diagnostics UART lines
-  if (DiagSerial.available()) {
-    String line = DiagSerial.readStringUntil('\n');
-    line.trim();
-    if (line.length()) {
-      Serial.print(nowStamp());
-      Serial.print("[DIAG RX] ");
-      Serial.println(line);
-      PARSER.handleCommand(line);
+  // --------------------------------------------------------------
+  // Handle diagnostics UART input (commands)
+  // --------------------------------------------------------------
+  static String diagLine;
+  while (DiagSerial.available()) {
+    char c = DiagSerial.read();
+    if (c == '\r' || c == '\n') {
+      diagLine.trim();
+      if (diagLine.length() > 0) {
+        Serial.println("[DIAG RX] " + diagLine);
+        PARSER->handleCommand(diagLine);
+      }
+      diagLine = "";
+    } else {
+      diagLine += c;
     }
   }
 
-  // Sensor UART lines
-  if (SensorSerial.available()) {
-    String line = SensorSerial.readStringUntil('\n');
-    line.trim();
-    if (line.length()) {
-      Serial.print(nowStamp());
-      Serial.print("[SENS RX] ");
-      Serial.println(line);
-      SENSORS.handleSensorLine(line);
+  // --------------------------------------------------------------
+  // Handle sensor UART input (sensor data + probe registration)
+  // --------------------------------------------------------------
+  static String sensLine;
+  while (SensorSerial.available()) {
+    char c = SensorSerial.read();
+    if (c == '\r' || c == '\n') {
+      sensLine.trim();
+      if (sensLine.length() > 0) {
+        Serial.println("[SENS RX] " + sensLine);
+        SENSORS->handleSensorMessage(sensLine);
+      }
+      sensLine = "";
+    } else {
+      sensLine += c;
     }
   }
-    // Background scheduled tasks
-  PARSER.processStatsJob();
 
+  // --------------------------------------------------------------
+  // Periodic STATS job (uses internal timer)
+  // --------------------------------------------------------------
+  if (PARSER) {
+    PARSER->processStatsJob();
+  }
+
+  delay(LOOP_DELAY_MS);
 }
 
