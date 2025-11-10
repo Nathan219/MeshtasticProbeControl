@@ -1,18 +1,20 @@
 #include "ConfigManager.h"
-#include <LittleFS.h>
+#include <SPIFFS.h>
 #include <ArduinoJson.h>
+
+#define FSYSTEM SPIFFS
 
 #define CONFIG_PATH "/config.json"
 
 // ================================================================
 bool ConfigManager::loadFromFS() {
-  if (!LittleFS.exists(CONFIG_PATH)) {
+  if (!FSYSTEM.exists(CONFIG_PATH)) {
     ensureDefaults();
     save();
     return true;
   }
 
-  File f = LittleFS.open(CONFIG_PATH, "r");
+  File f = FSYSTEM.open(CONFIG_PATH, "r");
   if (!f) return false;
 
   DynamicJsonDocument doc(8192);
@@ -24,16 +26,38 @@ bool ConfigManager::loadFromFS() {
   f.close();
 
   statsIntervalMs = doc["statsIntervalMs"] | 10000UL;
+
+  global.diagPixelInterval = doc["global"]["diagPixelInterval"] | 180000UL;
+
+  global.easterEgg   = doc["global"]["easterEgg"]   | false;
+  const char* agv    = doc["global"]["aggregateMode"] | "A";
+  global.aggregateMode = agv[0];
+  global.aggregateN  = doc["global"]["aggregateN"]  | 3;
+
   _areas.clear();
 
   for (JsonObject o : doc["areas"].as<JsonArray>()) {
     AreaConfig a;
     a.name        = (const char*)o["name"];
-    a.location    = (const char*)o["location"];
-    a.probeId     = (const char*)o["probeId"];
     a.useBaseline = o["useBaseline"] | true;
     a.overrideMin = o["overrideMin"] | -1.0f;
     a.overrideMax = o["overrideMax"] | -1.0f;
+
+    // --- handle probes array ---
+    if (o.containsKey("probes")) {
+      for (JsonObject p : o["probes"].as<JsonArray>()) {
+        ProbeConfig pc;
+        pc.id        = (const char*)p["id"];
+        pc.location  = (const char*)p["location"];
+        a.probes.push_back(pc);
+      }
+    } else if (o.containsKey("probeId")) {
+      // backward compatibility
+      ProbeConfig pc;
+      pc.id        = (const char*)o["probeId"];
+      pc.location  = (const char*)o["location"];
+      a.probes.push_back(pc);
+    }
 
     JsonArray thArr = o["thresholds"].as<JsonArray>();
     for (size_t i=0; i<thArr.size() && i<MET_COUNT; i++) {
@@ -50,7 +74,7 @@ bool ConfigManager::loadFromFS() {
 bool ConfigManager::save() {
   DynamicJsonDocument doc(8192);
   toJson(doc);
-  File f = LittleFS.open(CONFIG_PATH, "w");
+  File f = FSYSTEM.open(CONFIG_PATH, "w");
   if (!f) return false;
   serializeJsonPretty(doc, f);
   f.close();
@@ -60,15 +84,29 @@ bool ConfigManager::save() {
 // ================================================================
 void ConfigManager::toJson(JsonDocument& doc) {
   doc["statsIntervalMs"] = statsIntervalMs;
+  JsonObject g = doc.createNestedObject("global");
+  g["easterEgg"]        = global.easterEgg;
+  g["aggregateMode"]    = String(global.aggregateMode);
+  g["aggregateN"]       = global.aggregateN;
+  g["diagPixelInterval"] = global.diagPixelInterval;
+
+
   JsonArray arr = doc.createNestedArray("areas");
   for (auto& a : _areas) {
     JsonObject o = arr.createNestedObject();
     o["name"]        = a.name;
-    o["location"]    = a.location;
-    o["probeId"]     = a.probeId;
     o["useBaseline"] = a.useBaseline;
     o["overrideMin"] = a.overrideMin;
     o["overrideMax"] = a.overrideMax;
+
+    // --- probes array ---
+    JsonArray pa = o.createNestedArray("probes");
+    for (auto& p : a.probes) {
+      JsonObject pj = pa.createNestedObject();
+      pj["id"]        = p.id;
+      pj["location"]  = p.location;
+    }
+
     JsonArray thArr = o.createNestedArray("thresholds");
     for (int i=0; i<MET_COUNT; i++) {
       JsonArray row = thArr.createNestedArray();
@@ -85,6 +123,9 @@ void ConfigManager::ensureDefaults() {
   for (auto& n : defaults) {
     AreaConfig a;
     a.name = n;
+    a.useBaseline = true;
+    a.overrideMin = -1;
+    a.overrideMax = -1;
     _areas.push_back(a);
   }
 }
@@ -98,29 +139,49 @@ AreaConfig* ConfigManager::findAreaByName(const String& name) {
 }
 
 AreaConfig* ConfigManager::findAreaByProbe(const String& probe) {
-  for (auto& a : _areas)
-    if (a.probeId.equalsIgnoreCase(probe))
-      return &a;
+  for (auto& a : _areas) {
+    for (auto& p : a.probes) {
+      if (p.id.equalsIgnoreCase(probe))
+        return &a;
+    }
+  }
   return nullptr;
 }
+
 
 // ================================================================
 bool ConfigManager::setProbe(const String& probe, const String& area, const String& loc) {
   AreaConfig* a = findAreaByName(area);
   if (!a) return false;
-  a->probeId = probe;
-  a->location = loc;
+
+  // update existing if found
+  for (auto& p : a->probes) {
+    if (p.id.equalsIgnoreCase(probe)) {
+      p.location = loc;
+      return save();
+    }
+  }
+
+  // otherwise add new
+  ProbeConfig pc;
+  pc.id = probe;
+  pc.location = loc;
+  a->probes.push_back(pc);
   return save();
 }
 
 bool ConfigManager::removeProbe(const String& probe) {
-  for (auto& a : _areas)
-    if (a.probeId.equalsIgnoreCase(probe)) {
-      a.probeId = "";
-      return save();
+  for (auto& a : _areas) {
+    for (size_t i = 0; i < a.probes.size(); ++i) {
+      if (a.probes[i].id.equalsIgnoreCase(probe)) {
+        a.probes.erase(a.probes.begin() + i);
+        return save();
+      }
     }
+  }
   return false;
 }
+
 
 // ================================================================
 bool ConfigManager::setOverride(const String& area, bool isMin, float val) {
@@ -176,3 +237,46 @@ bool ConfigManager::setStatsInterval(unsigned long val) {
 unsigned long ConfigManager::getStatsInterval() const {
   return statsIntervalMs;
 }
+
+String ConfigManager::getConfigString() const {
+  String s = "CONFIG ";
+  s += "EE:" + String(global.easterEgg ? "T" : "F") + " ";
+  s += "AGV:" + String(global.aggregateMode) + " ";
+  s += "AGN:" + String(global.aggregateN) + " ";
+  s += " LEDI:" + String(global.ledUpdateInterval);
+  s += " DPI:"  + String(global.diagPixelInterval);
+
+  return s;
+}
+
+bool ConfigManager::setConfigValue(const String& key, const String& val) {
+  String k = key; k.toUpperCase();
+  String v = val; v.toUpperCase();
+
+  if (k == "EE") {
+    global.easterEgg = (v == "T" || v == "1" || v == "ON" || v == "TRUE");
+  }
+  else if (k == "AGV") {
+    if (v == "A" || v == "M") global.aggregateMode = v[0];
+    else return false;
+  }
+  else if (k == "AGN") {
+    int n = v.toInt();
+    if (n < 1 || n > 10) return false;
+    global.aggregateN = n;
+  }
+  else if (k == "LEDI") {
+    int n = v.toInt();
+    if (n < 100 || n > 60000) return false;
+    global.ledUpdateInterval = n;
+  }
+  else if (k == "DPI") {
+    int n = v.toInt();
+    if (n < 1000 || n > 600000) return false;
+    global.diagPixelInterval = n;
+  }
+  else return false;
+
+  return save();
+}
+

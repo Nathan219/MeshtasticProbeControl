@@ -1,6 +1,15 @@
 #include "SensorHandler.h"
 #include "Metrics.h"
 #include "ConfigManager.h"
+#include <math.h>
+
+// ================================================================
+// Multi-probe aware average/max computation for a metric in an area
+// ================================================================
+
+
+// Uncomment this to see LED aggregation debug logs over USB
+// #define DEBUG_LED_AGG 1
 
 // from CommandParser.cpp for unified timestamped output
 void echoDiagTX(const String& msg);
@@ -144,4 +153,84 @@ bool SensorHandler::getAllHistory(const String& probe, std::vector<std::pair<Met
     out.push_back(kv);
   }
   return true;
+}
+
+// ================================================================
+// Return the recent average (or max) of the last N values for metric m
+// across all probes assigned to the given area.
+float SensorHandler::areaMetricRecentAvg(const String& areaName, Metric m, int N) {
+  if (!_cfg) return NAN;
+  AreaConfig* a = _cfg->findAreaByName(areaName);
+  if (!a) return NAN;
+  if (a->probes.empty()) return NAN;
+
+  char aggMode = _cfg->global.aggregateMode;  // 'A' or 'M'
+  if (aggMode != 'A' && aggMode != 'M') aggMode = 'A';
+  if (N < 1) N = 1;
+  if (N > 10) N = 10;
+
+  float total = 0;
+  int count = 0;
+  float best = -INFINITY;
+
+#ifdef DEBUG_LED_AGG
+  if (_out) {
+    _out->println("[DEBUG_LED_AGG] Area: " + areaName + " Metric: " + metricToString(m));
+    _out->print("  Mode: "); _out->print(aggMode == 'A' ? "AVG" : "MAX");
+    _out->print("  Window: "); _out->println(N);
+  }
+#endif
+
+  for (auto& p : a->probes) {
+    auto it = _history.find(p.id);
+    if (it == _history.end()) continue;
+
+    const auto& probeData = it->second;
+    auto hit = probeData.find(m);
+    if (hit == probeData.end()) continue;
+
+    const auto& vals = hit->second;
+    if (vals.empty()) continue;
+
+    float sum = 0;
+    int used = 0;
+    for (int i = vals.size() - 1; i >= 0 && used < N; --i) {
+      sum += vals[i];
+      used++;
+    }
+    if (used == 0) continue;
+    float avg = sum / used;
+
+#ifdef DEBUG_LED_AGG
+    if (_out) {
+      _out->print("    Probe "); _out->print(p.id);
+      _out->print(" avg("); _out->print(used); _out->print("): ");
+      _out->println(avg, 2);
+    }
+#endif
+
+    if (aggMode == 'A') {
+      total += avg;
+      count++;
+    } else if (aggMode == 'M') {
+      if (avg > best) best = avg;
+    }
+  }
+
+  float result = NAN;
+  if (aggMode == 'A') {
+    if (count > 0) result = total / count;
+  } else {
+    if (best != -INFINITY) result = best;
+  }
+
+#ifdef DEBUG_LED_AGG
+  if (_out) {
+    _out->print("  Result: ");
+    if (isnan(result)) _out->println("NAN");
+    else _out->println(result, 2);
+  }
+#endif
+
+  return result;
 }

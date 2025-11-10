@@ -44,6 +44,9 @@ private:
   unsigned long _lastStatsSent = 0;
   unsigned long _statsIntervalMs = 10000;  // 10 s default interval
 
+  void cmdGetConfig();
+  void cmdSetConfig(const String& args);
+
   void sendDiag(const String& msg);
   void sendUSB(const String& msg);
   void printStatLine(const AreaConfig& a, Metric m);

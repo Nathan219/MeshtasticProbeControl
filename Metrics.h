@@ -13,5 +13,13 @@ enum Metric {
   MET_INVALID 
 };
 
+
+static const float METRIC_BASELINE_MAX[MET_COUNT] = {
+  2000.0f, // CO2 ppm
+  30.0f,   // Temperature °C
+  70.0f,  // Humidity %
+  100.0f   // Sound dB
+};
+
 String metricToString(Metric m);
 Metric metricFromString(const String& s);

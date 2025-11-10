@@ -74,13 +74,20 @@ void CommandParser::handleCommand(const String& line)  {
   // GET AREAS
   // --------------------------------------------------------------
   if (cmd.equalsIgnoreCase("GET AREAS")) {
-    for (auto& a : _cfg->areas()) {
-      String msg = "AREA: " + a.name;
-      if (a.location.length()) msg += " " + a.location;
-      if (a.probeId.length()) msg += " " + a.probeId;
-      sendDiag(msg);
-      sendUSB(msg);
-      // delay(MESSAGE_DELAY);
+    auto& areas = _cfg->areas();
+    for (auto& a : areas) {
+      if (a.probes.empty()) {
+        String msg = "AREA: " + a.name + " (no probes)";
+        sendDiag(msg);
+        sendUSB(msg);
+        continue;
+      }
+      for (auto& p : a.probes) {
+        String msg = "AREA: " + a.name + " " + p.location + " " + p.id;
+        sendDiag(msg);
+        sendUSB(msg);
+        delay(100);  // small pacing delay so Meshtastic doesn't drop lines
+      }
     }
     return;
   }
@@ -103,31 +110,99 @@ void CommandParser::handleCommand(const String& line)  {
   }
 
   // ==========================================
-  // GET THRESHOLDS {AREA_NAME}
+  // GET PEOPLW
+  // ==========================================
+  if (cmd.equalsIgnoreCase("GET PEOPLE")) {
+    auto& areas = _cfg->areas();
+    for (auto& a : areas) {
+      String msg = "PEOPLE " + a.name + " " + String(a.rt.lastPixel);
+      sendUSB(msg);
+      sendDiag(msg);
+    }
+  }
+  if (cmd.startsWith("GET PEOPLE")) {
+    String arg = cmd.substring(11);
+    arg.trim();
+    auto& areas = _cfg->areas();
+
+    for (auto& a : areas) {
+      if (arg.length() > 0 && !a.name.equalsIgnoreCase(arg)) continue;
+      String msg = "PEOPLE " + a.name + " " + String(a.rt.lastPixel);
+      if (arg.equalsIgnoreCase("VERBOSE")) {
+        msg += " (min=" + String(a.rt.liveMin[MET_CO2], 1) + ", max=" + String(a.rt.liveMax[MET_CO2], 1) + ")";
+      }
+      sendUSB(msg);
+      sendDiag(msg);
+    }
+  }
+
+  // ==========================================
+  // GET THRESHOLDS {AREA_NAME} [METRIC]
+  // If METRIC is provided, returns only that metric's thresholds
+  // If METRIC is omitted, returns all metrics' thresholds
   // ==========================================
   if (cmd.startsWith("GET THRESHOLDS")) {
-    String area = cmd.substring(14);
-    area.trim();
-    if (area.isEmpty()) {
+    String rest = cmd.substring(14);  // Skip "GET THRESHOLDS " (14 chars)
+    rest.trim();
+    
+    if (rest.isEmpty()) {
       sendDiag("ERR: Missing area name");
+      sendUSB("ERR: Missing area name");
       return;
+    }
+
+    // Find the first space to separate area from metric (if metric is provided)
+    int sp1 = rest.indexOf(' ');
+    String area;
+    String met;
+    bool hasMetric = (sp1 >= 0);
+
+    if (hasMetric) {
+      // Both area and metric provided
+      area = rest.substring(0, sp1);
+      met = rest.substring(sp1 + 1);
+      met.trim();
+    } else {
+      // Only area provided - will return all metrics
+      area = rest;
     }
 
     AreaConfig* a = _cfg->findAreaByName(area);
     if (!a) {
       sendDiag("ERR: Unknown area " + area);
+      sendUSB("ERR: Unknown area " + area);
       return;
     }
 
-    for (int mi = 0; mi < MET_COUNT; mi++) {
-      Metric m = static_cast<Metric>(mi);
+    if (hasMetric) {
+      // Return thresholds for the specified metric only
+      Metric m = metricFromString(met);
+      if (m == MET_INVALID) {
+        sendDiag("ERR: Invalid metric");
+        sendUSB("ERR: Invalid metric");
+        return;
+      }
+
       String msg = "THRESHOLD " + a->name + " " + metricToString(m);
       for (int i = 0; i < 6; i++)
         msg += " " + String(a->thresholds[m].values[i], 2);
 
+      // Send separately
       sendDiag(msg);
       sendUSB(msg);
-      delay(50); // small pacing delay to prevent overflow
+    } else {
+      // Return thresholds for all metrics - send each one separately
+      for (int mi = 0; mi < MET_COUNT; mi++) {
+        Metric m = static_cast<Metric>(mi);
+        String msg = "THRESHOLD " + a->name + " " + metricToString(m);
+        for (int i = 0; i < 6; i++)
+          msg += " " + String(a->thresholds[m].values[i], 2);
+
+        // Send each message separately with proper delays
+        sendDiag(msg);
+        sendUSB(msg);
+        // sendDiag already includes MESSAGE_DELAY, so each message is sent separately
+      }
     }
     return;
   }
@@ -215,8 +290,6 @@ void CommandParser::handleCommand(const String& line)  {
     return;
   }
 
-
-
   // --------------------------------------------------------------
   // GET HISTORY {PROBE}
   // --------------------------------------------------------------
@@ -277,6 +350,18 @@ void CommandParser::handleCommand(const String& line)  {
     return;
   }
 
+  if (cmd.equalsIgnoreCase("GET CONFIG")) {
+    cmdGetConfig();
+    return;
+  }
+  if (cmd.startsWith("SET CONFIG")) {
+    String args = cmd.substring(10);
+    args.trim();
+    cmdSetConfig(args);
+    return;
+  }
+
+
   sendDiag("ERR: Unrecognized command: " + cmd);
   sendUSB("ERR: Unrecognized command: " + cmd);
 }
@@ -324,3 +409,47 @@ void CommandParser::printStatLine(const AreaConfig& a, Metric m) {
   sendDiag(msg);
   sendUSB(msg);
 }
+
+void CommandParser::cmdGetConfig() {
+  sendDiag(_cfg->getConfigString());
+}
+
+void CommandParser::cmdSetConfig(const String& args) {
+  if (args.length() == 0) {
+    sendDiag("ERR: No config provided");
+    return;
+  }
+
+  // Example: "EE T, AGV M, AGN 5"
+  int last = 0;
+  int comma;
+  bool ok = true;
+  String applied = "CONFIG ";
+
+  String s = args + ","; // sentinel
+  while ((comma = s.indexOf(',', last)) != -1) {
+    String pair = s.substring(last, comma);
+    last = comma + 1;
+    pair.trim();
+    if (pair.length() == 0) continue;
+
+    int sp = pair.indexOf(' ');
+    if (sp < 0) { ok = false; continue; }
+
+    String key = pair.substring(0, sp);
+    String val = pair.substring(sp + 1);
+    key.trim(); val.trim();
+
+    if (_cfg->setConfigValue(key, val)) {
+      applied += key + ":" + val + " ";
+    } else {
+      ok = false;
+    }
+  }
+
+  if (ok)
+    sendDiag(applied + "Accepted");
+  else
+    sendDiag("ERR: Invalid CONFIG parameters");
+}
+

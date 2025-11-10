@@ -25,6 +25,11 @@ public:
   bool getHistory(const String& probe, Metric m, std::vector<float>& out);
   bool getAllHistory(const String& probe, std::vector<std::pair<Metric,std::vector<float>>>& out);
 
+
+  // Average of lastN samples per probe -> average across probes in the area.
+  // Returns NAN if no data.
+  float areaMetricRecentAvg(const String& area, Metric m, int lastN);
+
 private:
   ConfigManager* _cfg;
   Stream* _out;  // ✅ Works with both Serial (USB) and HardwareSerial

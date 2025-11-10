@@ -43,18 +43,23 @@
 // ================================================================
 
 #include <Arduino.h>
-#include <LittleFS.h>
+#include <SPIFFS.h>
 #include "ConfigManager.h"
 #include "SensorHandler.h"
 #include "CommandParser.h"
+#include "LedMessenger.h"
+
+#define FSYSTEM SPIFFS
 
 // ================================================================
 // --- UART CONFIGURATION ---
 // ================================================================
 #define SENSOR_RX_PIN 2
 #define SENSOR_TX_PIN 3
+
 #define DIAG_RX_PIN   5
 #define DIAG_TX_PIN   6
+
 #define BAUD_RATE     38400
 
 // ================================================================
@@ -69,9 +74,12 @@
 HardwareSerial SensorSerial(1);
 HardwareSerial DiagSerial(2);
 
+
 ConfigManager CONFIG;
 SensorHandler* SENSORS = nullptr;
 CommandParser* PARSER = nullptr;
+LedMessenger* LEDS = nullptr;
+
 
 // ================================================================
 // --- DIAGNOSTIC ECHO (shared utility) ---
@@ -98,30 +106,40 @@ void setup() {
   Serial.println("\n[BOOT] Meshtastic Coordinator starting...");
 
   // --- Initialize filesystem ---
-  if (!LittleFS.begin()) {
-    Serial.println("[ERR] LittleFS mount failed, formatting...");
-    LittleFS.format();
-    LittleFS.begin();
+  if (!FSYSTEM.begin()) {
+    Serial.println("[ERR] FSYSTEM mount failed, formatting...");
+    FSYSTEM.format();
+    FSYSTEM.begin();
+  }
+
+  Serial.println("Listing FSYSTEM files...");
+  File root = FSYSTEM.open("/");
+  File file = root.openNextFile();
+  while (file) {
+    Serial.printf(" - %s (%u bytes)\n", file.name(), file.size());
+    file = root.openNextFile();
   }
 
   // --- Initialize UARTs ---
   SensorSerial.begin(BAUD_RATE, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
   DiagSerial.begin(BAUD_RATE, SERIAL_8N1, DIAG_RX_PIN, DIAG_TX_PIN);
-
   Serial.println("[INIT] UARTs configured");
   Serial.println("[INIT] Loading configuration...");
 
-  // --- Load or create config ---
-  CONFIG.loadFromFS();
-  CONFIG.ensureDefaults();
-  CONFIG.save();
-
+  if (!CONFIG.loadFromFS()) {
+    Serial.println("[WARN] Failed to load config. Using defaults.");
+    CONFIG.ensureDefaults();
+    CONFIG.save();
+  }
+  
   // --- Create handlers ---
   SENSORS = new SensorHandler(&CONFIG, &Serial);
   SENSORS->setSensorSerial(&SensorSerial);
   SENSORS->setDiagSerial(&DiagSerial);
 
   PARSER = new CommandParser(&CONFIG, SENSORS, &DiagSerial, &Serial);
+
+  LEDS = new LedMessenger(&CONFIG, SENSORS, &Serial);
 
   Serial.println("[INIT] Setup complete. Coordinator ready.");
   echoDiagTX("Coordinator boot complete.");
@@ -173,6 +191,14 @@ void loop() {
   if (PARSER) {
     PARSER->processStatsJob();
   }
+  if (LEDS) {
+    LEDS->loop();
+  } else {
+      String msg = "LEDS NOT INITIALIZED!!";
+      Serial.println(msg);
+      DiagSerial.println(msg);
+  }
+
 
   delay(LOOP_DELAY_MS);
 }

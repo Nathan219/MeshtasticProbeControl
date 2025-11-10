@@ -4,9 +4,11 @@
 #include <ArduinoJson.h>
 #include "Metrics.h"
 
-// ================================================================
-//  Threshold & runtime data
-// ================================================================
+struct ProbeConfig {
+  String id;        // probe shortname (e.g., "0f4c")
+  String location;  // e.g., "Hallway"
+};
+
 struct ThresholdSet {
   float values[6] = {-1,-1,-1,-1,-1,-1};
 };
@@ -15,19 +17,27 @@ struct AreaRuntime {
   bool  inited[MET_COUNT] = {false,false,false,false};
   float liveMin[MET_COUNT] = {0};
   float liveMax[MET_COUNT] = {0};
+  int   lastPixel = 0;  
 };
 
 struct AreaConfig {
   String name;
-  String location;
-  String probeId;
+  std::vector<ProbeConfig> probes;  // <-- multiple probes now
   AreaRuntime rt;
   float overrideMin;
   float overrideMax;
   bool useBaseline;
-
   ThresholdSet thresholds[MET_COUNT];
 };
+
+struct GlobalConfig {
+  bool  easterEgg = false;
+  char  aggregateMode = 'A';
+  int   aggregateN = 3;
+  unsigned long ledUpdateInterval = 5000;       // ms between LED updates
+  unsigned long diagPixelInterval = 180000;     // ms between diagnostic prints
+};
+
 
 // ================================================================
 //  ConfigManager
@@ -35,6 +45,8 @@ struct AreaConfig {
 class ConfigManager {
 public:
   ConfigManager() {}
+
+  GlobalConfig global;  // ✅ new global config block
 
   bool loadFromFS();
   bool save();
@@ -57,6 +69,9 @@ public:
 
   bool setStatsInterval(unsigned long val);
   unsigned long getStatsInterval() const;
+
+  bool setConfigValue(const String& key, const String& val);
+  String getConfigString() const;
 
 private:
   std::vector<AreaConfig> _areas;
