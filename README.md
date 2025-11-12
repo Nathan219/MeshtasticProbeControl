@@ -46,7 +46,8 @@ Commands can arrive via the diagnostic UART or USB Serial.
 | `SET USE_BASELINE {AREA} {True/False}` | Enables/disables baseline use | |
 | `GET USE_BASELINE {AREA}` | Displays whether baseline is active | |
 | `REMOVE PROBE {PROBE_ID}` | Removes a probe from its assigned area | |
-| `SET PROBE {AREA} {LOCATION}` | Assigns a probe to an area/location | → `PROBE DFE8 FLOOR11 HALLWAY ACCEPTED` |
+| `SET PROBES {PROBE} {AREA} {LOCATION}` | Assigns or updates a probe via diagnostics UART | → `SET PROBES DFE8 FLOOR11 HALLWAY` |
+| `SET PROBE {AREA} {LOCATION}` | Assigns a probe to an area/location (from sensor UART) | → `PROBE DFE8 FLOOR11 HALLWAY ACCEPTED` |
 
 ---
 

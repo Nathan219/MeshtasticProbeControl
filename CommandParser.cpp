@@ -110,6 +110,69 @@ void CommandParser::handleCommand(const String& line)  {
   }
 
   // ==========================================
+  // GET PIXELS
+  // ==========================================
+  if (cmd.equalsIgnoreCase("GET PIXELS")) {
+    auto& areas = _cfg->areas();
+    for (auto& a : areas) {
+      String msg = "PIXELS " + a.name + " " + String(a.rt.lastPixel);
+      sendUSB(msg);
+      sendDiag(msg);
+    }
+    return;
+  }
+
+  // ==========================================
+  // SET PROBES {PROBE_ID} {AREA} {LOCATION}
+  // ==========================================
+  if (cmd.startsWith("SET PROBES")) {
+    String rest = cmd.substring(10);
+    rest.trim();
+
+    int sp1 = rest.indexOf(' ');
+    if (sp1 < 0) {
+      sendDiag("ERR: Missing probe id");
+      sendUSB("ERR: Missing probe id");
+      return;
+    }
+
+    String probeId = rest.substring(0, sp1);
+    probeId.trim();
+    probeId.toLowerCase();
+
+    String r2 = rest.substring(sp1 + 1);
+    r2.trim();
+    int sp2 = r2.indexOf(' ');
+    if (sp2 < 0) {
+      sendDiag("ERR: Missing area");
+      sendUSB("ERR: Missing area");
+      return;
+    }
+
+    String area = r2.substring(0, sp2);
+    area.trim();
+
+    String loc = r2.substring(sp2 + 1);
+    loc.trim();
+    if (loc.isEmpty()) {
+      sendDiag("ERR: Missing location");
+      sendUSB("ERR: Missing location");
+      return;
+    }
+
+    if (_cfg->setProbe(probeId, area, loc)) {
+      String msg = "PROBE " + probeId + " " + area + " " + loc + " ACCEPTED";
+      sendDiag(msg);
+      sendUSB(msg);
+    } else {
+      String msg = "ERR: Failed to set probe " + probeId;
+      sendDiag(msg);
+      sendUSB(msg);
+    }
+    return;
+  }
+
+  // ==========================================
   // GET PEOPLW
   // ==========================================
   if (cmd.equalsIgnoreCase("GET PEOPLE")) {
