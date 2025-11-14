@@ -1,5 +1,6 @@
 #include "CommandParser.h"
 #include "Metrics.h"
+#include "LedMessenger.h"
 
 #define MESSAGE_DELAY     2000
 
@@ -424,6 +425,59 @@ void CommandParser::handleCommand(const String& line)  {
     return;
   }
 
+  // ==========================================
+  // LED {MESSAGE}
+  // Forwards message to LED controller and returns response
+  // ==========================================
+  if (cmd.startsWith("LED ")) {
+    if (!_leds) {
+      sendDiag("ERR: LED controller not available");
+      sendUSB("ERR: LED controller not available");
+      return;
+    }
+    
+    String message = cmd.substring(4);  // Skip "LED "
+    message.trim();
+    
+    if (message.isEmpty()) {
+      sendDiag("ERR: Missing LED message");
+      sendUSB("ERR: Missing LED message");
+      return;
+    }
+    
+    // Send message to LED controller and get response
+    String response = _leds->sendLedWithResponse(message);
+    
+    // Format response (if empty, indicate no response received)
+    String result = "ACCEPTED LED -> " + (response.length() > 0 ? response : "(no response)");
+    sendDiag(result);
+    sendUSB(result);
+    return;
+  }
+
+  // ==========================================
+  // SET TESTMODE {TRUE/FALSE}
+  // Enables/disables test mode (cycles pixels 0-6 every 5 seconds)
+  // ==========================================
+  if (cmd.startsWith("SET TESTMODE ")) {
+    if (!_leds) {
+      sendDiag("ERR: LED controller not available");
+      sendUSB("ERR: LED controller not available");
+      return;
+    }
+    
+    String value = cmd.substring(13);  // Skip "SET TESTMODE "
+    value.trim();
+    value.toUpperCase();
+    
+    bool enabled = (value == "TRUE" || value == "1" || value == "ON");
+    _leds->setTestMode(enabled);
+    
+    String msg = "TESTMODE ACCEPTED";
+    sendDiag(msg);
+    sendUSB(msg);
+    return;
+  }
 
   sendDiag("ERR: Unrecognized command: " + cmd);
   sendUSB("ERR: Unrecognized command: " + cmd);

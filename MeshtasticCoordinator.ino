@@ -137,9 +137,9 @@ void setup() {
   SENSORS->setSensorSerial(&SensorSerial);
   SENSORS->setDiagSerial(&DiagSerial);
 
-  PARSER = new CommandParser(&CONFIG, SENSORS, &DiagSerial, &Serial);
-
   LEDS = new LedMessenger(&CONFIG, SENSORS, &Serial);
+
+  PARSER = new CommandParser(&CONFIG, SENSORS, &DiagSerial, &Serial, LEDS);
 
   Serial.println("[INIT] Setup complete. Coordinator ready.");
   echoDiagTX("Coordinator boot complete.");

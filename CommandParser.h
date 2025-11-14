@@ -26,8 +26,8 @@ struct StatsJob {
 // ================================================================
 class CommandParser {
 public:
-  CommandParser(ConfigManager* cfg, SensorHandler* sens, HardwareSerial* diag, Stream* usb)
-    : _cfg(cfg), _sensors(sens), _diag(diag), _usb(usb) {}
+  CommandParser(ConfigManager* cfg, SensorHandler* sens, HardwareSerial* diag, Stream* usb, class LedMessenger* leds = nullptr)
+    : _cfg(cfg), _sensors(sens), _diag(diag), _usb(usb), _leds(leds) {}
 
   void handleCommand(const String& line) ;
   void processStatsJob();
@@ -37,6 +37,7 @@ private:
   SensorHandler*   _sensors;
   HardwareSerial*  _diag;
   Stream*          _usb;
+  class LedMessenger* _leds;  // Forward declaration
   StatsJob         _statsJob;
   bool _sendingStats = false;
   int  _sendIndex = 0;
